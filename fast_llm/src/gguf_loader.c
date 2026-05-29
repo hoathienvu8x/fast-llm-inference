@@ -81,53 +81,102 @@ typedef struct {
     uint64_t size;
 } tensor_info_t;
 
-static uint64_t read_u64(FILE* f) {
-    uint64_t v;
-    fread(&v, 8, 1, f);
-    return v;
-}
-
-static uint32_t read_u32(FILE* f) {
-    uint32_t v;
-    fread(&v, 4, 1, f);
-    return v;
-}
-
-static int32_t read_i32(FILE* f) {
-    int32_t v;
-    fread(&v, 4, 1, f);
-    return v;
-}
-
-static uint8_t read_u8(FILE* f) {
-    uint8_t v;
-    fread(&v, 1, 1, f);
-    return v;
-}
-
-static char* read_string(FILE* f) {
-    uint64_t len = read_u64(f);
-    char* str = malloc(len + 1);
-    fread(str, 1, len, f);
-    str[len] = '\0';
-    return str;
-}
-
-static void skip_value(FILE* f, int type) {
-    switch (type) {
-        case 0: case 1: read_u8(f); break;
-        case 2: case 3: fread(&(uint16_t){0}, 2, 1, f); break;
-        case 4: case 5: case 6: read_u32(f); break;
-        case 7: read_u8(f); break;
-        case 8: free(read_string(f)); break;
-        case 9: {
-            int arr_type = read_i32(f);
-            uint64_t arr_len = read_u64(f);
-            for (uint64_t i = 0; i < arr_len; i++) skip_value(f, arr_type);
-            break;
-        }
-        case 10: case 11: case 12: read_u64(f); break;
+static int read_u64(FILE* f, uint64_t *v) {
+    if (f == NULL) return -1;
+    if (v) {
+      if (fread(v, 8, 1, f) == 1) return 0;
+    } else {
+      uint64_t dummy;
+      if (fread(&dummy, 8, 1, f) == 1) return 0;
     }
+    return -1;
+}
+
+static int read_u16(FILE* f, uint16_t *v) {
+    if (f == NULL) return -1;
+    if (v) {
+      if (fread(v, 2, 1, f) == 1) return 0;
+    } else {
+      uint16_t dummy;
+      if (fread(&dummy, 2, 1, f) == 1) return 0;
+    }
+    return -1;
+}
+
+static int read_u32(FILE* f, uint32_t *v) {
+    if (f == NULL) return -1;
+    if (v) {
+      if (fread(v, 4, 1, f) == 1) return 0;
+    } else {
+      uint32_t dummy;
+      if (fread(&dummy, 4, 1, f) == 1) return 0;
+    }
+    return -1;
+}
+
+static int read_i32(FILE* f, int32_t *v) {
+    if (f == NULL) return -1;
+    if (v) {
+      if (fread(v, 4, 1, f) == 1) return 0;
+    } else {
+      int32_t dummy;
+      if (fread(&dummy, 4, 1, f) == 1) return 0;
+    }
+    return -1;
+}
+
+static int read_u8(FILE* f, uint8_t *v) {
+    if (f == NULL) return -1;
+    if (v) {
+      if (fread(v, 1, 1, f) == 1) return 0;
+    } else {
+      uint8_t dummy;
+      if (fread(&dummy, 1, 1, f) == 1) return 0;
+    }
+    return -1;
+}
+
+static int read_string(FILE* f, char **str) {
+    uint64_t len = 0;
+    char *buf = NULL;
+    if (f == NULL) return -1;
+    if (read_u64(f, &len) != 0) return -1;
+    if (str == NULL) {
+      if (len > 0) {
+        if (fseek(f, (long)len, SEEK_CUR) != 0) return -1;
+      }
+      return 0;
+    }
+    buf = malloc(len + 1);
+    if (buf == NULL) return -1;
+    if (fread(buf, 1, len, f) != len) {
+      free(buf);
+      return -1;
+    }
+    buf[len] = '\0';
+    *str = buf;
+    return 0;
+}
+
+static int skip_value(FILE* f, int type) {
+    switch (type) {
+        case 0: case 1: return read_u8(f, NULL);
+        case 2: case 3: return read_u16(f, NULL);
+        case 4: case 5: case 6: return read_u32(f, NULL);
+        case 7: return read_u8(f, NULL);
+        case 8: return read_string(f, NULL);
+        case 9: {
+            int32_t arr_type;
+            uint64_t arr_len;
+            if (read_i32(f, &arr_type) || read_u64(f, &arr_len)) return -1;
+            for (uint64_t i = 0; i < arr_len; i++) {
+              if (skip_value(f, (int)arr_type)) return -1;
+            }
+            return 0;
+        }
+        case 10: case 11: case 12: return read_u64(f, NULL);
+    }
+    return -1;
 }
 
 /* Get block size and type size for GGML types */
@@ -355,17 +404,18 @@ transformer_model_t* model_load_gguf(const char* path, int use_int8) {
     }
     
     /* Read header */
-    uint32_t magic = read_u32(f);
-    if (magic != GGUF_MAGIC) {
+    uint32_t magic, version;
+    uint64_t num_tensors, num_metadata;
+    if (
+        read_u32(f, &magic) || magic != GGUF_MAGIC ||
+        read_u32(f, &version) || read_u64(f, &num_tensors) ||
+        read_u64(f, &num_metadata)
+    ) {
         printf("Error: Invalid GGUF magic (expected 0x%08X, got 0x%08X)\n", GGUF_MAGIC, magic);
         fclose(f);
         return NULL;
     }
-    
-    uint32_t version = read_u32(f);
-    uint64_t num_tensors = read_u64(f);
-    uint64_t num_metadata = read_u64(f);
-    
+
     printf("  Version: %d\n", version);
     printf("  Tensors: %llu\n", (unsigned long long)num_tensors);
     printf("  Metadata: %llu\n", (unsigned long long)num_metadata);
@@ -386,8 +436,11 @@ transformer_model_t* model_load_gguf(const char* path, int use_int8) {
     char** temp_vocab = NULL;
     int temp_vocab_size = 0;
     for (uint64_t i = 0; i < num_metadata; i++) {
-        char* key = read_string(f);
-        int type = read_i32(f);
+        char* key = NULL;
+        int32_t type;
+        if (read_string(f, &key) || read_i32(f, &type)) {
+          
+        }
         
         if (strcmp(key, "phi3.embedding_length") == 0 ||
             strcmp(key, "llama.embedding_length") == 0) {
